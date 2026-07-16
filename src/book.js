@@ -1,25 +1,27 @@
 #!/usr/bin/env node
 // knpark.com 자동 예매 프로그램
-// 지정한 시각(서버시간 기준)에 맞춰 로그인 → 예매 페이지 진입 → '신청' 클릭까지 자동화합니다.
-// 캡차/결제처럼 사람이 직접 해야 하는 단계는 창을 열어둔 채 대기합니다.
+// 지정한 시각(서버시간 기준)에 맞춰 예매 페이지 진입 → '신청' 클릭까지 자동화합니다.
+//
+// 로그인 방식:
+//   휴대폰 본인인증이 필요하므로 자동 로그인은 하지 않습니다.
+//   먼저 `npm run login` 으로 한 번 직접 로그인해두면, 그 로그인 상태(세션)가
+//   user-data 프로필에 저장되어 이 프로그램이 로그인된 상태로 시작합니다.
 //
 // 사용법:
 //   1) config.example.json 을 config.json 으로 복사하고 값을 채웁니다.
 //   2) npm install
-//   3) npm run book
+//   3) npm run login   (한 번 직접 로그인 — 휴대폰 인증 포함)
+//   4) npm run book
 //
 // 주의:
 //   - 반드시 본인 계정으로, 사이트 이용약관이 허용하는 범위(개인 정기권 신청 등)에서만 사용하세요.
 //   - 대량 신청/재판매 목적의 매크로 사용은 약관 위반 및 법적 문제가 될 수 있습니다.
 
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { chromium } from 'playwright';
+import { createInterface } from 'node:readline';
+import { join } from 'node:path';
+import { openPersistentContext, firstPage, ROOT } from './browser.js';
 import { getServerTimeOffset } from './serverTime.js';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = join(__dirname, '..');
 
 function loadConfig() {
   const path = join(ROOT, 'config.json');
@@ -32,7 +34,6 @@ function loadConfig() {
 
 // "2026-07-20T10:00:00" (KST) → epoch ms
 function kstToEpochMs(kstString) {
-  // 이미 오프셋이 붙어 있으면 그대로, 아니면 +09:00(KST) 를 붙여 해석
   const hasTz = /[zZ]|[+-]\d{2}:\d{2}$/.test(kstString);
   const iso = hasTz ? kstString : `${kstString}+09:00`;
   const ms = new Date(iso).getTime();
@@ -43,6 +44,11 @@ function kstToEpochMs(kstString) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function ask(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((res) => rl.question(question, (a) => { rl.close(); res(a); }));
+}
 
 // 네트워크 오류/서버 과부하 시 페이지 이동을 몇 번 재시도한다.
 async function gotoWithRetry(page, url, { retries = 3, waitUntil = 'domcontentloaded' } = {}) {
@@ -73,39 +79,53 @@ async function shot(page, cfg, name) {
   } catch { /* 스크린샷 실패는 무시 */ }
 }
 
-// 여러 후보 셀렉터(콤마 구분) 중 먼저 나타나는 것을 클릭
 async function clickAny(page, selector, { timeout = 5000 } = {}) {
   const loc = page.locator(selector).first();
   await loc.waitFor({ state: 'visible', timeout });
   await loc.click();
 }
 
-async function fillAny(page, selector, value, { timeout = 5000 } = {}) {
-  const loc = page.locator(selector).first();
-  await loc.waitFor({ state: 'visible', timeout });
-  await loc.fill(value);
-}
+// 저장된 세션으로 로그인 상태인지 확인. 아니면(가능하면) 창에서 직접 로그인하도록 대기.
+async function ensureLoggedIn(page, cfg, serverNow, deadlineMs) {
+  const check = cfg.selectors?.loginCheck?.trim();
+  const isLoggedIn = async () => {
+    if (!check) return null; // 확인용 셀렉터가 없으면 판별 불가
+    return (await page.locator(check).count()) > 0;
+  };
 
-async function login(page, cfg) {
-  const { selectors, credentials } = cfg;
-  console.log('[로그인] 로그인 페이지로 이동합니다...');
-  await gotoWithRetry(page, selectors.loginUrl);
-  await shot(page, cfg, 'login-page');
-
-  try {
-    await fillAny(page, selectors.idInput, credentials.id);
-    await fillAny(page, selectors.passwordInput, credentials.password);
-    await clickAny(page, selectors.loginButton);
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    console.log('[로그인] 로그인 시도 완료.');
-  } catch (e) {
-    console.warn(`[로그인] 자동 로그인 실패: ${e.message}`);
-    console.warn('[로그인] 브라우저 창에서 직접 로그인해 주세요. 로그인 후 자동으로 계속됩니다.');
+  const logged = await isLoggedIn();
+  if (logged === null) {
+    console.warn('[로그인] selectors.loginCheck 가 설정되지 않아 로그인 상태를 자동 확인할 수 없습니다.');
+    console.warn('[로그인] 창이 로그인된 상태인지 눈으로 확인하세요. (권장: loginCheck 설정)');
+    return;
   }
-  await shot(page, cfg, 'after-login');
+  if (logged) {
+    console.log('[로그인] 저장된 세션으로 로그인된 상태입니다. ✔');
+    return;
+  }
+
+  // 로그인 안 됨
+  console.warn('[로그인] 로그인 상태가 아닙니다. 먼저 `npm run login` 으로 로그인해두는 것을 권장합니다.');
+  if (cfg.options?.headless) {
+    throw new Error('로그인 상태가 아니며 headless 모드라 직접 로그인할 수 없습니다. `npm run login` 을 먼저 실행하세요.');
+  }
+
+  // 창이 보이는 모드면, 남은 warmup 시간 동안 직접 로그인할 기회를 준다.
+  console.log('[로그인] 브라우저 창에서 지금 로그인(휴대폰 인증 포함)하세요. 로그인되면 자동으로 계속됩니다.');
+  for (;;) {
+    if (await isLoggedIn()) {
+      console.log('[로그인] 로그인 확인됨. ✔');
+      return;
+    }
+    if (deadlineMs && serverNow().getTime() > deadlineMs) {
+      console.warn('[로그인] 예매 시각이 임박했습니다. 로그인 확인 없이 계속 진행합니다.');
+      return;
+    }
+    await sleep(1000);
+  }
 }
 
-// 목표 시각(서버시간)까지 정밀 대기. 남은 시간에 따라 sleep 간격을 좁혀 정확도를 높인다.
+// 목표 시각(서버시간)까지 정밀 대기.
 async function waitUntilServerTime(targetEpochMs, serverNow, label) {
   console.log(`[대기] ${label} 목표 서버시각: ${fmt(targetEpochMs)}`);
   for (;;) {
@@ -119,14 +139,13 @@ async function waitUntilServerTime(targetEpochMs, serverNow, label) {
     } else if (remaining > 500) {
       await sleep(100);
     } else {
-      // 마지막 500ms 는 바쁜 대기(busy-wait)로 최대한 정밀하게
       while (serverNow().getTime() < targetEpochMs) { /* spin */ }
       return;
     }
   }
 }
 
-// 예매 대상 항목 선택(itemText 가 지정된 경우 해당 행/카드 안의 신청 버튼을 우선)
+// 예매 대상 항목의 '신청' 버튼 클릭 (실패 시 재시도)
 async function clickReserve(page, cfg) {
   const { selectors, target, options } = cfg;
   const retries = options?.clickRetries ?? 40;
@@ -136,7 +155,6 @@ async function clickReserve(page, cfg) {
     try {
       let scope = page;
       if (target.itemText && target.itemText.trim()) {
-        // itemText 를 포함하는 가장 가까운 행/카드로 범위를 좁힌다
         const row = page
           .locator(`tr:has-text("${target.itemText}"), li:has-text("${target.itemText}"), div:has-text("${target.itemText}")`)
           .first();
@@ -178,35 +196,27 @@ async function main() {
     console.warn('[경고] 이미 목표 시각이 지났습니다. 즉시 예매를 시도합니다.');
   }
 
-  // 2) 브라우저 실행 + 로그인 (목표 시각 warmup 이전에 미리 준비)
-  const execPath = process.env.KNPARK_BROWSER_PATH || cfg.options?.browserExecutablePath || undefined;
-  const proxyServer = process.env.KNPARK_PROXY || cfg.options?.proxyServer || undefined;
-  const browser = await chromium.launch({
-    headless: cfg.options?.headless ?? false,
-    executablePath: execPath,
-    proxy: proxyServer ? { server: proxyServer } : undefined,
-    args: ['--disable-blink-features=AutomationControlled'],
-  });
-  const context = await browser.newContext({
-    locale: 'ko-KR',
-    timezoneId: 'Asia/Seoul',
-    viewport: { width: 1280, height: 900 },
-  });
-  const page = await context.newPage();
+  // 2) 저장된 로그인 세션으로 영구 프로필 브라우저 실행
+  const context = await openPersistentContext(cfg);
+  const page = firstPage(context);
 
   try {
-    // 목표 - warmup 시각까지 여유가 있으면 그때까지 기다렸다가 로그인
     const warmupAt = targetEpochMs - warmupMs;
+
+    // 3) warmup 시각까지 대기했다가 예매 페이지 진입 + 로그인 상태 확인
     if (serverNow().getTime() < warmupAt) {
       await waitUntilServerTime(warmupAt, serverNow, '준비(warmup)');
     }
 
-    await login(page, cfg);
-
-    // 3) 예매 페이지 진입
     console.log('[진입] 예매 페이지로 이동합니다...');
     await gotoWithRetry(page, cfg.target.reservationUrl);
     await shot(page, cfg, 'reservation-page');
+
+    // 로그인 상태 확인 (목표 시각 직전까지 직접 로그인할 기회 제공)
+    await ensureLoggedIn(page, cfg, serverNow, targetEpochMs - fireLeadMs);
+
+    // 로그인 후 페이지가 바뀌었을 수 있으니 예매 페이지를 한 번 더 보장
+    await gotoWithRetry(page, cfg.target.reservationUrl);
 
     // 4) 목표 시각(- fireLead)까지 정밀 대기 후 신청
     await waitUntilServerTime(targetEpochMs - fireLeadMs, serverNow, '예매 시작');
@@ -215,7 +225,6 @@ async function main() {
     const ok = await clickReserve(page, cfg);
     await shot(page, cfg, 'after-reserve');
 
-    // 확인/결제 버튼이 있으면 한 번 눌러줌(있을 때만)
     if (ok && cfg.selectors.confirmButton) {
       try {
         await clickAny(page, cfg.selectors.confirmButton, { timeout: 3000 });
@@ -230,17 +239,14 @@ async function main() {
       console.log(`[대기] ${keep}초 동안 창을 열어둡니다. 필요한 경우 결제/캡차를 진행하세요.`);
       await sleep(keep * 1000);
     } else {
-      console.log('[대기] 창을 열어둔 채 대기합니다. 결제/캡차를 마친 뒤 Ctrl+C 로 종료하세요.');
-      await new Promise(() => {}); // 무한 대기
+      console.log('[대기] 창을 열어둔 채 대기합니다. 결제/캡차를 마친 뒤 이 터미널에서 Enter 를 누르면 종료됩니다.');
+      await ask('');
     }
   } catch (e) {
-    console.error('[오류]', e);
+    console.error('[오류]', e.message || e);
     await shot(page, cfg, 'error');
   } finally {
-    // keepOpenSeconds 가 설정된 경우에만 정상 종료로 브라우저를 닫음
-    if ((cfg.options?.keepOpenSeconds ?? 0) > 0) {
-      await browser.close();
-    }
+    await context.close();
   }
 }
 
