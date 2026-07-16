@@ -1,0 +1,48 @@
+{
+  "_comment": "이 파일을 config.json 으로 복사한 뒤 값을 채우세요. config.json 은 git 에 올라가지 않습니다.",
+
+  "credentials": {
+    "id": "본인_아이디",
+    "password": "본인_비밀번호"
+  },
+
+  "schedule": {
+    "_comment": "예매를 시작할 목표 시각(한국시간 기준, KST). 이 시각의 서버시간에 맞춰 '신청' 을 시도합니다.",
+    "targetTimeKST": "2026-07-20T10:00:00",
+    "_comment2": "목표 시각 몇 초 전에 미리 로그인/페이지 진입을 끝내둘지(초).",
+    "warmupSeconds": 60,
+    "_comment3": "목표 시각보다 몇 밀리초 먼저 첫 클릭을 쏠지(네트워크 지연 보정). 보통 100~300ms.",
+    "fireLeadMs": 200
+  },
+
+  "target": {
+    "_comment": "예매 대상 페이지 URL. 로그인 후 실제 정기권/티켓 신청 페이지 주소로 바꾸세요.",
+    "reservationUrl": "https://www.knpark.com/",
+    "_comment2": "여러 항목 중 무엇을 고를지 구분하기 위한 텍스트(예: 역 이름, 정기권 종류). 비워두면 첫 번째 신청 버튼을 누릅니다.",
+    "itemText": ""
+  },
+
+  "selectors": {
+    "_comment": "사이트 구조가 바뀌면 이 셀렉터들을 실제 값으로 수정하세요. npm run inspect 로 요소를 확인할 수 있습니다.",
+    "loginUrl": "https://www.knpark.com/login.html",
+    "idInput": "input[name='userId'], input#userId, input[name='id'], input#id",
+    "passwordInput": "input[type='password'], input[name='password'], input#password",
+    "loginButton": "button[type='submit'], input[type='submit'], .btn_login, a.login",
+    "reserveButton": "button:has-text('신청'), button:has-text('예매'), a:has-text('신청'), a:has-text('예매'), .btn_apply, .btn_reserve",
+    "confirmButton": "button:has-text('확인'), button:has-text('결제'), .btn_confirm"
+  },
+
+  "options": {
+    "_comment": "headless=false 로 두면 브라우저 창이 보이며, 캡차/결제 등 사람이 개입해야 하는 단계를 직접 처리할 수 있습니다.",
+    "headless": false,
+    "_comment0": "Playwright 기본 브라우저 대신 특정 브라우저 실행파일을 쓰려면 경로를 지정(비우면 기본값). 환경변수 KNPARK_BROWSER_PATH 로도 지정 가능.",
+    "browserExecutablePath": "",
+    "_comment2": "목표 시각 도달 후 '신청' 버튼이 눌릴 때까지 재시도하는 최대 횟수/간격(ms).",
+    "clickRetries": 40,
+    "clickIntervalMs": 250,
+    "_comment3": "매 단계 스크린샷을 남길지 여부(screenshots/ 폴더).",
+    "screenshots": true,
+    "_comment4": "신청 성공 후 결제/캡차를 위해 창을 열어둘 시간(초). 0 이면 무한 대기(직접 종료).",
+    "keepOpenSeconds": 0
+  }
+}

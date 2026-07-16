@@ -1,0 +1,20 @@
+{
+  "name": "knpark-booking",
+  "version": "1.0.0",
+  "description": "코레일네트웍스 KNPARK(knpark.com) 정기권/티켓을 지정한 시각에 자동으로 예매하는 프로그램",
+  "type": "module",
+  "bin": {
+    "knpark-book": "src/book.js"
+  },
+  "scripts": {
+    "book": "node src/book.js",
+    "time": "node src/serverTime.js",
+    "inspect": "node src/inspect.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}
