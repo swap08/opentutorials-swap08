@@ -3,5 +3,6 @@ config.json
 user-data/
 screenshots/
 buy-target.txt
+reserve-requests.log
 *.log
 .DS_Store

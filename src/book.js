@@ -17,7 +17,7 @@
 //   - 반드시 본인 계정으로, 사이트 이용약관이 허용하는 범위(개인 정기권 신청 등)에서만 사용하세요.
 //   - 대량 신청/재판매 목적의 매크로 사용은 약관 위반 및 법적 문제가 될 수 있습니다.
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { openPersistentContext, firstPage, ROOT } from './browser.js';
@@ -252,6 +252,27 @@ async function captureBuyTarget(btn) {
   } catch { /* 포착 실패는 무시 */ }
 }
 
+// 구매 관련 네트워크 요청(주소/방식/POST 데이터)을 파일에 기록한다.
+// → 실제 0시에 오가는 '구매 요청' 을 확보해, 다음엔 '직접 요청 발사(가장 빠름)' 로 만들 수 있다.
+function attachNetworkCapture(page, cfg) {
+  if (cfg.options?.captureNetwork === false) return;
+  const file = join(ROOT, 'reserve-requests.log');
+  page.on('request', (req) => {
+    try {
+      const u = req.url();
+      const isBuyish = /season|buy|reserv|apply|purchase|정기/i.test(u);
+      if (!isBuyish && req.method() !== 'POST') return;
+      appendFileSync(file, JSON.stringify({
+        time: new Date().toISOString(),
+        method: req.method(),
+        url: u,
+        contentType: req.headers()['content-type'] || null,
+        postData: req.postData() || null,
+      }) + '\n', 'utf-8');
+    } catch { /* 기록 실패 무시 */ }
+  });
+}
+
 // 페이지가 '유효한 구매 페이지' 인지 대략 판별(에러/접수전 문구가 없고 구매/결제 요소가 있으면 성공)
 async function looksLikeBuyPage(page, cfg) {
   const bad = await page.locator("text=/접수\\s*전|없는\\s*페이지|4[0-9]4|오류|권한/").count().catch(() => 0);
@@ -371,6 +392,7 @@ async function main() {
     const pages = [page];
     for (let i = 1; i < nTabs; i++) pages.push(await context.newPage());
     if (nTabs > 1) console.log(`[병렬] ${nTabs}개 탭으로 동시에 시도합니다.`);
+    pages.forEach((p) => attachNetworkCapture(p, cfg)); // 구매 요청 기록 시작
     await Promise.all(pages.map((p) => goToItemPage(p, cfg).catch(() => {})));
 
     // 5) 목표 시각(- fireLead)까지 정밀 대기 후, 모든 탭이 동시에 신청(먼저 성공한 탭이 승리)
