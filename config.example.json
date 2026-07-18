@@ -18,8 +18,8 @@
     "pageNo": 3,
     "_comment_pageurl": "만약 페이지 이동 시 주소(URL)가 바뀐다면 그 주소를 여기 넣으면 더 확실합니다(예: ...seasonBuy.do?pageIndex=3). 비우면 pageNo 로 이동.",
     "pageUrl": "",
-    "_comment2": "대상 행을 찾을 정확한 주차장명 텍스트. 목록의 '주차장명' 칸에 표시된 그대로 넣으세요.",
-    "itemText": "대전 선상"
+    "_comment2": "대상 행을 찾을 정확한 주차장명 텍스트(목록의 '주차장명' 칸 그대로). 정확히 일치하는 행만 선택합니다.",
+    "itemText": "대전역 선상"
   },
 
   "selectors": {

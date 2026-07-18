@@ -189,10 +189,15 @@ async function goToItemPage(page, cfg) {
       }
     }
   }
-  // 대상 항목 행이 나타날 때까지 잠깐 대기
+  // 대상 항목 행이 나타날 때까지 잠깐 대기 (정확히 일치하는 텍스트로)
   if (t.itemText && t.itemText.trim()) {
-    await page.locator(`text=${t.itemText}`).first().waitFor({ timeout: 3000 }).catch(() => {});
+    await page.getByText(t.itemText, { exact: true }).first().waitFor({ timeout: 3000 }).catch(() => {});
   }
+}
+
+// itemText 와 '정확히 일치'하는 셀을 가진 행을 반환 (예: '대전역 선상' 이 '서대전역 선상' 을 잘못 잡지 않도록)
+function itemRow(page, itemText) {
+  return page.locator('tr').filter({ has: page.getByText(itemText, { exact: true }) }).first();
 }
 
 // 대상 항목의 '구매하기' 버튼 클릭 (0시에 버튼이 생기므로 새로고침하며 재시도)
@@ -209,10 +214,10 @@ async function clickReserve(page, cfg) {
         await goToItemPage(page, cfg);
       }
 
-      // 대상 주차장 행으로 범위를 좁힘
+      // 대상 주차장 행으로 범위를 좁힘 (정확 일치)
       let scope = page;
       if (target.itemText && target.itemText.trim()) {
-        const row = page.locator(`tr:has-text("${target.itemText}")`).first();
+        const row = itemRow(page, target.itemText);
         if (await row.count()) scope = row;
         else { await sleep(interval); continue; } // 아직 행이 없으면 다음 시도
       }
