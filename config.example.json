@@ -12,10 +12,14 @@
   },
 
   "target": {
-    "_comment": "예매 대상 페이지 URL. 대전 선상주차장 정기주차권 구매 페이지.",
+    "_comment": "예매 대상 페이지 URL(정기권 구매 목록 페이지).",
     "reservationUrl": "https://www.knpark.com/season/seasonBuy.do",
-    "_comment2": "여러 항목 중 무엇을 고를지 구분하기 위한 텍스트. '대전 선상주차장' 이 포함된 행/버튼을 우선 클릭합니다.",
-    "itemText": "대전 선상주차장"
+    "_comment_page": "대상 주차장이 목록 몇 페이지에 있는지(대전 선상주차장은 3페이지). 목록이 여러 페이지로 나뉘어 있어 이 번호로 이동합니다.",
+    "pageNo": 3,
+    "_comment_pageurl": "만약 페이지 이동 시 주소(URL)가 바뀐다면 그 주소를 여기 넣으면 더 확실합니다(예: ...seasonBuy.do?pageIndex=3). 비우면 pageNo 로 이동.",
+    "pageUrl": "",
+    "_comment2": "대상 행을 찾을 정확한 주차장명 텍스트. 목록의 '주차장명' 칸에 표시된 그대로 넣으세요.",
+    "itemText": "대전 선상"
   },
 
   "selectors": {

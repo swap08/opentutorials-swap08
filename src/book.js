@@ -170,35 +170,63 @@ async function waitUntilServerTime(targetEpochMs, serverNow, label) {
   }
 }
 
-// 예매 대상 항목의 '신청' 버튼 클릭 (실패 시 재시도)
+// 대상 항목이 있는 목록 페이지로 이동한다.
+// - target.pageUrl 이 있으면 그 주소로 바로 이동(가장 확실)
+// - 없으면 reservationUrl 로 간 뒤, 페이지 번호(target.pageNo)를 클릭해 이동
+async function goToItemPage(page, cfg) {
+  const t = cfg.target;
+  if (t.pageUrl && t.pageUrl.trim()) {
+    await gotoWithRetry(page, t.pageUrl);
+  } else {
+    await gotoWithRetry(page, t.reservationUrl);
+    const pageNo = Number(t.pageNo) || 1;
+    if (pageNo > 1) {
+      // 페이지네이션에서 해당 번호 링크 클릭 (예: "3")
+      const link = page.getByRole('link', { name: String(pageNo), exact: true }).first();
+      if (await link.count()) {
+        await link.click().catch(() => {});
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+      }
+    }
+  }
+  // 대상 항목 행이 나타날 때까지 잠깐 대기
+  if (t.itemText && t.itemText.trim()) {
+    await page.locator(`text=${t.itemText}`).first().waitFor({ timeout: 3000 }).catch(() => {});
+  }
+}
+
+// 대상 항목의 '구매하기' 버튼 클릭 (0시에 버튼이 생기므로 새로고침하며 재시도)
 async function clickReserve(page, cfg) {
   const { selectors, target, options } = cfg;
-  const retries = options?.clickRetries ?? 40;
+  const retries = options?.clickRetries ?? 60;
   const interval = options?.clickIntervalMs ?? 250;
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
+      // 8회마다(또는 첫 시도) 새로고침+페이지 이동으로 최신 접수상태를 가져온다
+      if (attempt === 1 || attempt % 8 === 0) {
+        if (attempt > 1) console.log(`[신청] 재시도 중... (${attempt}/${retries}) — 새로고침 후 대상 페이지로 이동`);
+        await goToItemPage(page, cfg);
+      }
+
+      // 대상 주차장 행으로 범위를 좁힘
       let scope = page;
       if (target.itemText && target.itemText.trim()) {
-        const row = page
-          .locator(`tr:has-text("${target.itemText}"), li:has-text("${target.itemText}"), div:has-text("${target.itemText}")`)
-          .first();
+        const row = page.locator(`tr:has-text("${target.itemText}")`).first();
         if (await row.count()) scope = row;
+        else { await sleep(interval); continue; } // 아직 행이 없으면 다음 시도
       }
+
       const btn = scope.locator(selectors.reserveButton).first();
       await btn.waitFor({ state: 'visible', timeout: interval });
       await btn.click({ timeout: 2000 });
-      console.log(`[신청] 신청 버튼 클릭 성공 (시도 ${attempt}회)`);
+      console.log(`[신청] '구매하기' 클릭 성공 (시도 ${attempt}회)`);
       return true;
     } catch {
-      if (attempt % 8 === 0) {
-        console.log(`[신청] 재시도 중... (${attempt}/${retries}) — 페이지를 새로고침합니다.`);
-        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-      }
       await sleep(interval);
     }
   }
-  console.warn('[신청] 자동 클릭에 실패했습니다. 창에서 직접 신청을 진행해 주세요.');
+  console.warn('[신청] 자동 클릭에 실패했습니다. 창에서 직접 대전 선상주차장 구매를 진행해 주세요.');
   return false;
 }
 
@@ -239,8 +267,8 @@ async function main() {
     const warmupAt = targetEpochMs - warmupMs;
     await waitWithKeepAlive(page, cfg, warmupAt, serverNow);
 
-    // 예매 페이지를 최신 상태로 한 번 더
-    await gotoWithRetry(page, cfg.target.reservationUrl);
+    // 대상 항목이 있는 페이지(예: 3페이지)로 미리 이동해 대기
+    await goToItemPage(page, cfg);
 
     // 5) 목표 시각(- fireLead)까지 정밀 대기 후 신청
     await waitUntilServerTime(targetEpochMs - fireLeadMs, serverNow, '예매 시작');
