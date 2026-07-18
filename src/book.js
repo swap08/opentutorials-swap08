@@ -105,13 +105,15 @@ async function ensureLoggedIn(page, cfg, serverNow, deadlineMs) {
   }
 
   // 로그인 안 됨
-  console.warn('[로그인] 로그인 상태가 아닙니다. 먼저 `npm run login` 으로 로그인해두는 것을 권장합니다.');
+  console.warn('[로그인] 로그인 상태가 아닙니다.');
   if (cfg.options?.headless) {
-    throw new Error('로그인 상태가 아니며 headless 모드라 직접 로그인할 수 없습니다. `npm run login` 을 먼저 실행하세요.');
+    throw new Error('로그인 상태가 아니며 headless 모드라 직접 로그인할 수 없습니다. headless 를 false 로 두고 다시 실행하세요.');
   }
 
-  // 창이 보이는 모드면, 남은 warmup 시간 동안 직접 로그인할 기회를 준다.
-  console.log('[로그인] 브라우저 창에서 지금 로그인(휴대폰 인증 포함)하세요. 로그인되면 자동으로 계속됩니다.');
+  // 창이 보이는 모드면, 목표 시각 직전까지 직접 로그인할 기회를 준다.
+  console.log('\n>>> 지금 브라우저 창에서 로그인하세요! <<<');
+  console.log('    (주소창에 www.knpark.com 입력 → 로그인 → 휴대폰 본인인증)');
+  console.log('    로그인이 확인되면 자동으로 예매 시각까지 대기합니다.\n');
   for (;;) {
     if (await isLoggedIn()) {
       console.log('[로그인] 로그인 확인됨. ✔');
@@ -120,6 +122,29 @@ async function ensureLoggedIn(page, cfg, serverNow, deadlineMs) {
     if (deadlineMs && serverNow().getTime() > deadlineMs) {
       console.warn('[로그인] 예매 시각이 임박했습니다. 로그인 확인 없이 계속 진행합니다.');
       return;
+    }
+    await sleep(1000);
+  }
+}
+
+// 목표 시각까지 대기하면서, 로그인 세션이 풀리지 않도록 주기적으로 새로고침한다.
+async function waitWithKeepAlive(page, cfg, untilMs, serverNow) {
+  const keepAliveMs = (cfg.options?.keepAliveSeconds ?? 120) * 1000;
+  if (serverNow().getTime() >= untilMs) return;
+  console.log(`[대기] 예매 준비 시각까지 대기합니다: ${fmt(untilMs)}`);
+  let lastReload = serverNow().getTime();
+  for (;;) {
+    const now = serverNow().getTime();
+    const remaining = untilMs - now;
+    if (remaining <= 0) return;
+    // 준비 시각까지 5초 이상 남았고, 마지막 새로고침 후 keepAlive 간격이 지났으면 새로고침
+    if (keepAliveMs > 0 && remaining > 5000 && now - lastReload >= keepAliveMs) {
+      await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+      lastReload = now;
+      console.log(`[유지] 세션 유지용 새로고침 (남은 ${(remaining / 1000).toFixed(0)}초)`);
+    }
+    if (Math.floor(remaining / 1000) % 30 === 0 && remaining > 5000) {
+      console.log(`[대기] 남은 시간 약 ${(remaining / 1000).toFixed(0)}초...`);
     }
     await sleep(1000);
   }
@@ -201,24 +226,23 @@ async function main() {
   const page = firstPage(context);
 
   try {
-    const warmupAt = targetEpochMs - warmupMs;
-
-    // 3) warmup 시각까지 대기했다가 예매 페이지 진입 + 로그인 상태 확인
-    if (serverNow().getTime() < warmupAt) {
-      await waitUntilServerTime(warmupAt, serverNow, '준비(warmup)');
-    }
-
+    // 3) 프로그램 시작 즉시 예매 페이지로 이동 + 로그인 확인
+    //    로그인이 안 돼 있으면 지금 창에서 직접 로그인하도록 기다립니다.
+    //    (창을 계속 열어두므로 세션 방식 로그인도 예매 시각까지 유지됩니다)
     console.log('[진입] 예매 페이지로 이동합니다...');
     await gotoWithRetry(page, cfg.target.reservationUrl);
     await shot(page, cfg, 'reservation-page');
 
-    // 로그인 상태 확인 (목표 시각 직전까지 직접 로그인할 기회 제공)
     await ensureLoggedIn(page, cfg, serverNow, targetEpochMs - fireLeadMs);
 
-    // 로그인 후 페이지가 바뀌었을 수 있으니 예매 페이지를 한 번 더 보장
+    // 4) 목표 시각 직전(warmup)까지 대기 — 그동안 주기적으로 새로고침해 세션 유지
+    const warmupAt = targetEpochMs - warmupMs;
+    await waitWithKeepAlive(page, cfg, warmupAt, serverNow);
+
+    // 예매 페이지를 최신 상태로 한 번 더
     await gotoWithRetry(page, cfg.target.reservationUrl);
 
-    // 4) 목표 시각(- fireLead)까지 정밀 대기 후 신청
+    // 5) 목표 시각(- fireLead)까지 정밀 대기 후 신청
     await waitUntilServerTime(targetEpochMs - fireLeadMs, serverNow, '예매 시작');
     console.log(`[발사] ${fmt(serverNow().getTime())} — 신청을 시작합니다!`);
 
