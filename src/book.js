@@ -264,24 +264,27 @@ async function looksLikeBuyPage(page, cfg) {
 // - target.buyUrl 이 있으면: 그 주소로 '직행'(가장 빠름)
 // - 없으면: 목록을 새로고침하며 대상 행의 '구매하기' 를 클릭
 // 정상일 땐 짧은 간격으로 촘촘히, 서버가 실제로 오류를 내면 백오프로 물러선다.
-async function clickReserve(page, cfg) {
+async function clickReserve(page, cfg, control = {}, tag = '') {
   const { selectors, target, options } = cfg;
   const maxSeconds = options?.maxTrySeconds ?? 180;
   const baseInterval = options?.clickIntervalMs ?? 250;   // 정상일 때 촘촘한 간격
   const maxBackoff = (options?.maxBackoffSeconds ?? 6) * 1000;
   const directUrl = target.buyUrl && target.buyUrl.trim();
+  const pfx = tag ? `[신청${tag}] ` : '[신청] ';
 
   const deadline = Date.now() + maxSeconds * 1000;
   let backoff = 0, cycle = 0, captured = false;
 
-  while (Date.now() < deadline) {
+  while (!control.done && Date.now() < deadline) {
     cycle++;
     try {
       if (directUrl) {
         // ── 직행 모드: 구매 URL 로 바로 이동 ──
         await gotoWithRetry(page, target.buyUrl, { retries: 1 });
         if (await looksLikeBuyPage(page, cfg)) {
-          console.log(`[신청] 구매 페이지 직행 성공! (${cycle}회)`);
+          if (control.done) return false;
+          control.done = true; control.winner = page;
+          console.log(`${pfx}구매 페이지 직행 성공! (${cycle}회)`);
           return true;
         }
       } else {
@@ -291,10 +294,12 @@ async function clickReserve(page, cfg) {
         if (await row.count()) {
           const btn = row.locator(selectors.reserveButton).first();
           if (await btn.count()) {
-            if (!captured) { captured = true; await captureBuyTarget(btn); } // 버튼 주소 포착(빠름, 1회)
+            if (!captured && !control.captured) { captured = control.captured = true; await captureBuyTarget(btn); }
             await btn.scrollIntoViewIfNeeded().catch(() => {});
+            if (control.done) return false;
             await btn.click({ timeout: 3000 });
-            console.log(`[신청] '구매하기' 클릭 성공! (${cycle}회)`);
+            control.done = true; control.winner = page;
+            console.log(`${pfx}'구매하기' 클릭 성공! (${cycle}회)`);
             return true;
           }
           // 행은 있으나 구매버튼 없음 = 접수 시작 전 → 정상, 계속 시도
@@ -304,16 +309,15 @@ async function clickReserve(page, cfg) {
     } catch (e) {
       // 접속 실패/타임아웃 = 서버 과부하 신호 → 대기시간을 늘려 서버를 덜 두들긴다
       backoff = Math.min(backoff ? backoff * 2 : 1000, maxBackoff);
-      console.warn(`[신청] 접속 지연/오류 — ${(backoff / 1000).toFixed(1)}초 후 재시도 (${String(e.message || e).split('\n')[0]})`);
+      console.warn(`${pfx}접속 지연/오류 — ${(backoff / 1000).toFixed(1)}초 후 재시도 (${String(e.message || e).split('\n')[0]})`);
     }
 
     if (cycle % 10 === 0) {
       const remain = Math.max(0, Math.round((deadline - Date.now()) / 1000));
-      console.log(`[신청] 계속 시도 중... (${cycle}회, 남은 ${remain}초)`);
+      console.log(`${pfx}계속 시도 중... (${cycle}회, 남은 ${remain}초)`);
     }
     await sleep(backoff || baseInterval);
   }
-  console.warn('[신청] 제한 시간 내 실패. 열려 있는 창에서 직접 구매를 진행해 주세요.');
   return false;
 }
 
@@ -362,21 +366,32 @@ async function main() {
     const warmupAt = targetEpochMs - warmupMs;
     await waitWithKeepAlive(page, cfg, warmupAt, serverNow);
 
-    // 대상 항목이 있는 페이지(예: 3페이지)로 미리 이동해 대기 (실패해도 발사는 진행)
-    await goToItemPage(page, cfg).catch(() => {});
+    // 병렬 탭 준비: parallelTabs 개수만큼 페이지를 만들어 모두 대상 페이지로 미리 이동
+    const nTabs = Math.max(1, Math.min(Number(cfg.options?.parallelTabs) || 1, 6));
+    const pages = [page];
+    for (let i = 1; i < nTabs; i++) pages.push(await context.newPage());
+    if (nTabs > 1) console.log(`[병렬] ${nTabs}개 탭으로 동시에 시도합니다.`);
+    await Promise.all(pages.map((p) => goToItemPage(p, cfg).catch(() => {})));
 
-    // 5) 목표 시각(- fireLead)까지 정밀 대기 후 신청
+    // 5) 목표 시각(- fireLead)까지 정밀 대기 후, 모든 탭이 동시에 신청(먼저 성공한 탭이 승리)
     await waitUntilServerTime(targetEpochMs - fireLeadMs, serverNow, '예매 시작');
     console.log(`[발사] ${fmt(serverNow().getTime())} — 신청을 시작합니다!`);
 
-    const ok = await clickReserve(page, cfg);
-    await shot(page, cfg, 'after-reserve');
+    const control = { done: false };
+    const results = await Promise.all(
+      pages.map((p, i) => clickReserve(p, cfg, control, nTabs > 1 ? `#${i + 1}` : '')),
+    );
+    const ok = results.some(Boolean);
+    const winner = control.winner || page;
+    if (!ok) console.warn('[신청] 제한 시간 내 자동 신청에 실패했습니다. 열려 있는 창에서 직접 진행해 주세요.');
+    await winner.bringToFront().catch(() => {});
+    await shot(winner, cfg, 'after-reserve');
 
     if (ok && cfg.selectors.confirmButton) {
       try {
-        await clickAny(page, cfg.selectors.confirmButton, { timeout: 3000 });
+        await clickAny(winner, cfg.selectors.confirmButton, { timeout: 3000 });
         console.log('[확인] 확인/결제 버튼을 눌렀습니다.');
-        await shot(page, cfg, 'after-confirm');
+        await shot(winner, cfg, 'after-confirm');
       } catch { /* 없으면 통과 */ }
     }
 
