@@ -19,7 +19,9 @@
     "_comment_pageurl": "만약 페이지 이동 시 주소(URL)가 바뀐다면 그 주소를 여기 넣으면 더 확실합니다(예: ...seasonBuy.do?pageIndex=3). 비우면 pageNo 로 이동.",
     "pageUrl": "",
     "_comment2": "대상 행을 찾을 정확한 주차장명 텍스트(목록의 '주차장명' 칸 그대로). 정확히 일치하는 행만 선택합니다.",
-    "itemText": "대전역 선상"
+    "itemText": "대전역 선상",
+    "_comment_buyurl": "'직행 모드' 용 구매 URL. 첫 실행 때 buy-target.txt 에 기록되는 구매버튼 주소를 확인해 여기 넣으면, 다음부터 목록/페이지네이션을 건너뛰고 바로 구매 페이지로 이동해 훨씬 빠릅니다. 비우면 목록 모드.",
+    "buyUrl": ""
   },
 
   "selectors": {
@@ -40,7 +42,7 @@
     "browserExecutablePath": "",
     "_comment2": "0시 이후 '구매하기' 를 시도하는 방식. maxTrySeconds 동안, 정상일 땐 clickIntervalMs 간격으로, 접속 오류가 나면 점점 더 기다렸다(백오프, 최대 maxBackoffSeconds) 재시도합니다. → F5 연타보다 서버에 덜 부담되고 차단 위험이 낮습니다.",
     "maxTrySeconds": 180,
-    "clickIntervalMs": 800,
+    "clickIntervalMs": 250,
     "maxBackoffSeconds": 6,
     "_comment3": "매 단계 스크린샷을 남길지 여부(screenshots/ 폴더).",
     "screenshots": true,

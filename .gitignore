@@ -2,5 +2,6 @@ node_modules/
 config.json
 user-data/
 screenshots/
+buy-target.txt
 *.log
 .DS_Store

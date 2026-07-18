@@ -17,7 +17,7 @@
 //   - 반드시 본인 계정으로, 사이트 이용약관이 허용하는 범위(개인 정기권 신청 등)에서만 사용하세요.
 //   - 대량 신청/재판매 목적의 매크로 사용은 약관 위반 및 법적 문제가 될 수 있습니다.
 
-import { readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { openPersistentContext, firstPage, ROOT } from './browser.js';
@@ -234,49 +234,86 @@ function itemRow(page, itemText) {
   return page.locator('tr').filter({ has: page.getByText(itemText, { exact: true }) }).first();
 }
 
-// 대상 항목의 '구매하기' 버튼 클릭.
-// 0시에 버튼이 생기므로 목록을 다시 불러오며 재시도하되,
-// 서버 과부하/오류 시에는 점점 더 기다렸다 재시도(백오프)해서 서버를 더 두들기지 않는다.
+// '구매하기' 버튼이 처음 나타난 순간, 그 실제 주소(href/onclick)를 화면과 파일에 기록한다.
+// → 다음 실행부터 target.buyUrl 에 그 주소를 넣으면 '직행 모드' 로 훨씬 빠르게 예매할 수 있다.
+async function captureBuyTarget(btn) {
+  try {
+    const info = await btn.evaluate((n) => ({
+      href: n.getAttribute('href'),
+      onclick: n.getAttribute('onclick'),
+      html: n.outerHTML,
+    }));
+    console.log('\n★★★ 구매 버튼 정보(포착) ★★★');
+    console.log(' href   :', info.href || '(없음)');
+    console.log(' onclick:', info.onclick || '(없음)');
+    console.log(' html   :', (info.html || '').slice(0, 300));
+    console.log('  → 이 정보를 알려주시면 다음엔 "직행 모드" 로 더 빠르게 만들 수 있습니다.\n');
+    writeFileSync(join(ROOT, 'buy-target.txt'), JSON.stringify(info, null, 2), 'utf-8');
+  } catch { /* 포착 실패는 무시 */ }
+}
+
+// 페이지가 '유효한 구매 페이지' 인지 대략 판별(에러/접수전 문구가 없고 구매/결제 요소가 있으면 성공)
+async function looksLikeBuyPage(page, cfg) {
+  const bad = await page.locator("text=/접수\\s*전|없는\\s*페이지|4[0-9]4|오류|권한/").count().catch(() => 0);
+  if (bad) return false;
+  const sel = cfg.selectors.confirmButton?.trim() || cfg.selectors.reserveButton;
+  return (await page.locator(sel).first().count().catch(() => 0)) > 0;
+}
+
+// 대상 항목의 '구매하기' 실행.
+// - target.buyUrl 이 있으면: 그 주소로 '직행'(가장 빠름)
+// - 없으면: 목록을 새로고침하며 대상 행의 '구매하기' 를 클릭
+// 정상일 땐 짧은 간격으로 촘촘히, 서버가 실제로 오류를 내면 백오프로 물러선다.
 async function clickReserve(page, cfg) {
   const { selectors, target, options } = cfg;
-  const maxSeconds = options?.maxTrySeconds ?? 180;      // 최대 몇 초 동안 시도할지
-  const baseInterval = options?.clickIntervalMs ?? 800;  // 정상일 때 재시도 간격(너무 빠르지 않게)
+  const maxSeconds = options?.maxTrySeconds ?? 180;
+  const baseInterval = options?.clickIntervalMs ?? 250;   // 정상일 때 촘촘한 간격
   const maxBackoff = (options?.maxBackoffSeconds ?? 6) * 1000;
+  const directUrl = target.buyUrl && target.buyUrl.trim();
 
   const deadline = Date.now() + maxSeconds * 1000;
-  let backoff = 0;   // 오류 시 대기시간(ms). 성공 응답이면 0으로 리셋.
-  let cycle = 0;
+  let backoff = 0, cycle = 0, captured = false;
 
   while (Date.now() < deadline) {
     cycle++;
     try {
-      // 목록을 새로 불러오고 대상 페이지로 이동(최신 접수상태 반영)
-      await goToItemPage(page, cfg);
-
-      // 대상 주차장 행 찾기(정확 일치)
-      const row = itemRow(page, target.itemText);
-      if (await row.count()) {
-        const btn = row.locator(selectors.reserveButton).first();
-        if (await btn.count()) {
-          await btn.scrollIntoViewIfNeeded().catch(() => {});
-          await btn.click({ timeout: 3000 });
-          console.log(`[신청] '구매하기' 클릭 성공! (${cycle}번째 시도)`);
+      if (directUrl) {
+        // ── 직행 모드: 구매 URL 로 바로 이동 ──
+        await gotoWithRetry(page, target.buyUrl, { retries: 1 });
+        if (await looksLikeBuyPage(page, cfg)) {
+          console.log(`[신청] 구매 페이지 직행 성공! (${cycle}회)`);
           return true;
         }
-        // 행은 있는데 아직 구매버튼이 없음 = 접수 시작 전 → 정상, 계속 시도
+      } else {
+        // ── 목록 모드: 새로고침 → 대상 페이지 → 대상 행의 구매하기 클릭 ──
+        await goToItemPage(page, cfg);
+        const row = itemRow(page, target.itemText);
+        if (await row.count()) {
+          const btn = row.locator(selectors.reserveButton).first();
+          if (await btn.count()) {
+            if (!captured) { captured = true; await captureBuyTarget(btn); } // 버튼 주소 포착(빠름, 1회)
+            await btn.scrollIntoViewIfNeeded().catch(() => {});
+            await btn.click({ timeout: 3000 });
+            console.log(`[신청] '구매하기' 클릭 성공! (${cycle}회)`);
+            return true;
+          }
+          // 행은 있으나 구매버튼 없음 = 접수 시작 전 → 정상, 계속 시도
+        }
       }
-      backoff = 0; // 페이지는 정상적으로 받았으므로 백오프 없음
+      backoff = 0; // 페이지를 정상적으로 받았으면 백오프 없음(촘촘히 재시도)
     } catch (e) {
       // 접속 실패/타임아웃 = 서버 과부하 신호 → 대기시간을 늘려 서버를 덜 두들긴다
       backoff = Math.min(backoff ? backoff * 2 : 1000, maxBackoff);
       console.warn(`[신청] 접속 지연/오류 — ${(backoff / 1000).toFixed(1)}초 후 재시도 (${String(e.message || e).split('\n')[0]})`);
     }
 
-    const remain = Math.max(0, Math.round((deadline - Date.now()) / 1000));
-    if (cycle % 5 === 0) console.log(`[신청] 계속 시도 중... (${cycle}회 시도, 남은 ${remain}초)`);
+    if (cycle % 10 === 0) {
+      const remain = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      console.log(`[신청] 계속 시도 중... (${cycle}회, 남은 ${remain}초)`);
+    }
     await sleep(backoff || baseInterval);
   }
-  console.warn('[신청] 제한 시간 내 자동 클릭에 실패했습니다. 열려 있는 창에서 직접 구매를 진행해 주세요.');
+  console.warn('[신청] 제한 시간 내 실패. 열려 있는 창에서 직접 구매를 진행해 주세요.');
   return false;
 }
 
