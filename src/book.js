@@ -120,7 +120,8 @@ async function ensureLoggedIn(page, cfg, serverNow, deadlineMs) {
       return;
     }
     if (deadlineMs && serverNow().getTime() > deadlineMs) {
-      console.warn('[로그인] 예매 시각이 임박했습니다. 로그인 확인 없이 계속 진행합니다.');
+      console.warn('[로그인] 예매 시각이 지나도록 로그인이 확인되지 않았습니다.');
+      console.warn('[로그인] (로그인이 안 되면 목록/구매 페이지가 안 보여 예매가 실패합니다. 다음엔 더 일찍 실행해 로그인하세요.)');
       return;
     }
     await sleep(1000);
@@ -170,6 +171,44 @@ async function waitUntilServerTime(targetEpochMs, serverNow, label) {
   }
 }
 
+// 페이지네이션에서 지정한 번호 링크를 여러 방식으로 시도해 클릭한다.
+async function clickPageLink(page, pageNo) {
+  const re = new RegExp(`^\\s*${pageNo}\\s*$`);
+  const candidates = [
+    page.getByRole('link', { name: String(pageNo), exact: true }),
+    page.locator('a').filter({ hasText: re }),
+    page.locator('[class*=pag] a, [id*=pag] a, .paginate a, .pagination a, .paging a').filter({ hasText: re }),
+    page.locator('a[href*="age"]').filter({ hasText: re }), // page/Page/pageIndex 등
+  ];
+  for (const loc of candidates) {
+    const el = loc.first();
+    if (await el.count()) {
+      await el.click().catch(() => {});
+      await page.waitForLoadState('domcontentloaded').catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
+// 진단용: 대상 페이지/행을 못 찾을 때 현재 상태를 화면에 출력한다.
+async function dumpDiagnostics(page, cfg) {
+  try {
+    console.warn('----- 진단 정보 -----');
+    console.warn('현재 주소:', page.url());
+    const check = cfg.selectors?.loginCheck?.trim();
+    if (check) {
+      const loggedIn = (await page.locator(check).count()) > 0;
+      console.warn('로그인 상태:', loggedIn ? '로그인됨' : '로그인 안 됨(← 목록/페이지가 안 보이는 원인일 수 있음)');
+    }
+    const links = await page.locator('a').filter({ hasText: /^\s*\d+\s*$/ }).allInnerTexts().catch(() => []);
+    console.warn('숫자 링크(페이지네이션 후보):', links.map((s) => s.trim()).filter(Boolean).join(' ') || '(없음)');
+    const hasItem = (await page.getByText(cfg.target.itemText, { exact: true }).count()) > 0;
+    console.warn(`대상 행 '${cfg.target.itemText}' 존재:`, hasItem ? '있음' : '없음');
+    console.warn('---------------------');
+  } catch { /* 진단 실패는 무시 */ }
+}
+
 // 대상 항목이 있는 목록 페이지로 이동한다.
 // - target.pageUrl 이 있으면 그 주소로 바로 이동(가장 확실)
 // - 없으면 reservationUrl 로 간 뒤, 페이지 번호(target.pageNo)를 클릭해 이동
@@ -181,17 +220,19 @@ async function goToItemPage(page, cfg) {
     await gotoWithRetry(page, t.reservationUrl);
     const pageNo = Number(t.pageNo) || 1;
     if (pageNo > 1) {
-      // 페이지네이션에서 해당 번호 링크 클릭 (예: "3")
-      const link = page.getByRole('link', { name: String(pageNo), exact: true }).first();
-      if (await link.count()) {
-        await link.click().catch(() => {});
-        await page.waitForLoadState('domcontentloaded').catch(() => {});
-      }
+      const clicked = await clickPageLink(page, pageNo);
+      if (!clicked) console.warn(`[이동] ${pageNo}페이지 링크를 찾지 못했습니다.`);
     }
   }
   // 대상 항목 행이 나타날 때까지 잠깐 대기 (정확히 일치하는 텍스트로)
   if (t.itemText && t.itemText.trim()) {
-    await page.getByText(t.itemText, { exact: true }).first().waitFor({ timeout: 3000 }).catch(() => {});
+    const appeared = await page
+      .getByText(t.itemText, { exact: true })
+      .first()
+      .waitFor({ timeout: 3000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!appeared) await dumpDiagnostics(page, cfg);
   }
 }
 
