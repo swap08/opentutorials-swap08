@@ -23,8 +23,12 @@ export async function getServerTimeOffset(url = DEFAULT_HOST, samples = 5) {
     try {
       res = await fetch(url, { method: 'HEAD', cache: 'no-store' });
     } catch {
-      // HEAD 를 막는 서버가 있으므로 GET 으로 재시도
-      res = await fetch(url, { method: 'GET', cache: 'no-store' });
+      // HEAD 를 막는 서버가 있으므로 GET 으로 재시도. 이마저 실패하면 이 표본은 건너뜀.
+      try {
+        res = await fetch(url, { method: 'GET', cache: 'no-store' });
+      } catch {
+        continue;
+      }
     }
     const t1 = Date.now();
 

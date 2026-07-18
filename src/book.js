@@ -85,46 +85,39 @@ async function clickAny(page, selector, { timeout = 5000 } = {}) {
   await loc.click();
 }
 
-// 저장된 세션으로 로그인 상태인지 확인. 아니면(가능하면) 창에서 직접 로그인하도록 대기.
-async function ensureLoggedIn(page, cfg, serverNow, deadlineMs) {
+// 로그인 확인: 저장된 세션이면 통과, 아니면 '직접 로그인 후 Enter' 로 확인한다.
+// (자동 감지가 실패해도 사용자가 Enter 로 확정하므로 확실하다)
+async function ensureLoggedIn(page, cfg) {
   const check = cfg.selectors?.loginCheck?.trim();
   const isLoggedIn = async () => {
-    if (!check) return null; // 확인용 셀렉터가 없으면 판별 불가
+    if (!check) return null;
     return (await page.locator(check).count()) > 0;
   };
 
-  const logged = await isLoggedIn();
-  if (logged === null) {
-    console.warn('[로그인] selectors.loginCheck 가 설정되지 않아 로그인 상태를 자동 확인할 수 없습니다.');
-    console.warn('[로그인] 창이 로그인된 상태인지 눈으로 확인하세요. (권장: loginCheck 설정)');
-    return;
-  }
-  if (logged) {
-    console.log('[로그인] 저장된 세션으로 로그인된 상태입니다. ✔');
+  if ((await isLoggedIn()) === true) {
+    console.log('[로그인] 이미 로그인된 상태입니다. ✔');
     return;
   }
 
-  // 로그인 안 됨
-  console.warn('[로그인] 로그인 상태가 아닙니다.');
   if (cfg.options?.headless) {
-    throw new Error('로그인 상태가 아니며 headless 모드라 직접 로그인할 수 없습니다. headless 를 false 로 두고 다시 실행하세요.');
+    throw new Error('로그인이 필요하지만 headless 모드입니다. options.headless 를 false 로 두고 다시 실행하세요.');
   }
 
-  // 창이 보이는 모드면, 목표 시각 직전까지 직접 로그인할 기회를 준다.
-  console.log('\n>>> 지금 브라우저 창에서 로그인하세요! <<<');
-  console.log('    (주소창에 www.knpark.com 입력 → 로그인 → 휴대폰 본인인증)');
-  console.log('    로그인이 확인되면 자동으로 예매 시각까지 대기합니다.\n');
-  for (;;) {
-    if (await isLoggedIn()) {
-      console.log('[로그인] 로그인 확인됨. ✔');
-      return;
-    }
-    if (deadlineMs && serverNow().getTime() > deadlineMs) {
-      console.warn('[로그인] 예매 시각이 지나도록 로그인이 확인되지 않았습니다.');
-      console.warn('[로그인] (로그인이 안 되면 목록/구매 페이지가 안 보여 예매가 실패합니다. 다음엔 더 일찍 실행해 로그인하세요.)');
-      return;
-    }
-    await sleep(1000);
+  console.log('\n============================================================');
+  console.log(' 브라우저 창에서 로그인하세요.');
+  console.log('  1) (로그인 화면이 아니면) 주소창에 www.knpark.com 입력');
+  console.log('  2) 로그인 + 휴대폰 본인인증 완료');
+  console.log('  ※ 반드시 "이 프로그램이 연 브라우저 창" 에서 로그인하세요.');
+  console.log('     (평소 쓰던 다른 크롬 창에서 로그인하면 인식되지 않습니다)');
+  console.log('============================================================');
+  await ask('\n>>> 로그인을 완료했으면 여기서 Enter 를 누르세요... ');
+
+  const after = await isLoggedIn();
+  if (after === false) {
+    console.warn('[로그인] 로그아웃 표시를 아직 못 찾았습니다. 브라우저에 "로그아웃/이현섭님" 이 보이면 정상입니다.');
+    console.warn('[로그인] 그대로 계속 진행합니다.');
+  } else {
+    console.log('[로그인] 확인되었습니다. ✔');
   }
 }
 
@@ -300,14 +293,22 @@ async function main() {
   const page = firstPage(context);
 
   try {
-    // 3) 프로그램 시작 즉시 예매 페이지로 이동 + 로그인 확인
-    //    로그인이 안 돼 있으면 지금 창에서 직접 로그인하도록 기다립니다.
-    //    (창을 계속 열어두므로 세션 방식 로그인도 예매 시각까지 유지됩니다)
+    // 3) 프로그램 시작 즉시 예매 페이지로 이동 + 로그인 확인(Enter 로 확정)
+    //    창을 계속 열어두므로 세션 방식 로그인도 예매 시각까지 유지됩니다.
     console.log('[진입] 예매 페이지로 이동합니다...');
     await gotoWithRetry(page, cfg.target.reservationUrl);
     await shot(page, cfg, 'reservation-page');
 
-    await ensureLoggedIn(page, cfg, serverNow, targetEpochMs - fireLeadMs);
+    await ensureLoggedIn(page, cfg);
+
+    // 로그인 후 대상 페이지(예: 3페이지)로 이동해 잘 보이는지 미리 확인
+    console.log('[확인] 대상 목록 페이지로 이동해 봅니다...');
+    await goToItemPage(page, cfg);
+    if (await itemRow(page, cfg.target.itemText).count()) {
+      console.log(`[확인] '${cfg.target.itemText}' 행을 찾았습니다. ✔ (지금은 접수전이라 구매 버튼은 0시에 생깁니다)`);
+    } else {
+      console.warn(`[확인] '${cfg.target.itemText}' 행을 아직 못 찾았습니다. 위 진단 정보를 확인하세요.`);
+    }
 
     // 4) 목표 시각 직전(warmup)까지 대기 — 그동안 주기적으로 새로고침해 세션 유지
     const warmupAt = targetEpochMs - warmupMs;
