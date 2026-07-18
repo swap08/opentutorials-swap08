@@ -12,8 +12,8 @@
   },
 
   "target": {
-    "_comment": "예매 대상 페이지 URL. 로그인 후 실제 '대전 선상주차장 정기주차권' 신청 페이지 주소로 바꾸세요. (npm run inspect 로 확인)",
-    "reservationUrl": "https://www.knpark.com/",
+    "_comment": "예매 대상 페이지 URL. 대전 선상주차장 정기주차권 구매 페이지.",
+    "reservationUrl": "https://www.knpark.com/season/seasonBuy.do",
     "_comment2": "여러 항목 중 무엇을 고를지 구분하기 위한 텍스트. '대전 선상주차장' 이 포함된 행/버튼을 우선 클릭합니다.",
     "itemText": "대전 선상주차장"
   },
@@ -23,7 +23,7 @@
     "loginUrl": "https://www.knpark.com/",
     "_comment_check": "로그인된 상태에서만 보이는 요소의 셀렉터(예: 로그아웃 링크, 마이페이지, 내 아이디). 이것으로 로그인 여부를 확인합니다. 비우면 확인을 건너뜁니다.",
     "loginCheck": "a:has-text('로그아웃'), a:has-text('마이페이지'), .logout",
-    "reserveButton": "button:has-text('신청'), button:has-text('예매'), a:has-text('신청'), a:has-text('예매'), .btn_apply, .btn_reserve",
+    "reserveButton": "button:has-text('구매'), a:has-text('구매'), button:has-text('신청'), a:has-text('신청'), button:has-text('예매'), a:has-text('예매'), .btn_buy, .btn_apply, .btn_reserve",
     "confirmButton": "button:has-text('확인'), button:has-text('결제'), .btn_confirm"
   },
 
