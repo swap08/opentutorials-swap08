@@ -234,38 +234,49 @@ function itemRow(page, itemText) {
   return page.locator('tr').filter({ has: page.getByText(itemText, { exact: true }) }).first();
 }
 
-// 대상 항목의 '구매하기' 버튼 클릭 (0시에 버튼이 생기므로 새로고침하며 재시도)
+// 대상 항목의 '구매하기' 버튼 클릭.
+// 0시에 버튼이 생기므로 목록을 다시 불러오며 재시도하되,
+// 서버 과부하/오류 시에는 점점 더 기다렸다 재시도(백오프)해서 서버를 더 두들기지 않는다.
 async function clickReserve(page, cfg) {
   const { selectors, target, options } = cfg;
-  const retries = options?.clickRetries ?? 60;
-  const interval = options?.clickIntervalMs ?? 250;
+  const maxSeconds = options?.maxTrySeconds ?? 180;      // 최대 몇 초 동안 시도할지
+  const baseInterval = options?.clickIntervalMs ?? 800;  // 정상일 때 재시도 간격(너무 빠르지 않게)
+  const maxBackoff = (options?.maxBackoffSeconds ?? 6) * 1000;
 
-  for (let attempt = 1; attempt <= retries; attempt++) {
+  const deadline = Date.now() + maxSeconds * 1000;
+  let backoff = 0;   // 오류 시 대기시간(ms). 성공 응답이면 0으로 리셋.
+  let cycle = 0;
+
+  while (Date.now() < deadline) {
+    cycle++;
     try {
-      // 8회마다(또는 첫 시도) 새로고침+페이지 이동으로 최신 접수상태를 가져온다
-      if (attempt === 1 || attempt % 8 === 0) {
-        if (attempt > 1) console.log(`[신청] 재시도 중... (${attempt}/${retries}) — 새로고침 후 대상 페이지로 이동`);
-        await goToItemPage(page, cfg);
-      }
+      // 목록을 새로 불러오고 대상 페이지로 이동(최신 접수상태 반영)
+      await goToItemPage(page, cfg);
 
-      // 대상 주차장 행으로 범위를 좁힘 (정확 일치)
-      let scope = page;
-      if (target.itemText && target.itemText.trim()) {
-        const row = itemRow(page, target.itemText);
-        if (await row.count()) scope = row;
-        else { await sleep(interval); continue; } // 아직 행이 없으면 다음 시도
+      // 대상 주차장 행 찾기(정확 일치)
+      const row = itemRow(page, target.itemText);
+      if (await row.count()) {
+        const btn = row.locator(selectors.reserveButton).first();
+        if (await btn.count()) {
+          await btn.scrollIntoViewIfNeeded().catch(() => {});
+          await btn.click({ timeout: 3000 });
+          console.log(`[신청] '구매하기' 클릭 성공! (${cycle}번째 시도)`);
+          return true;
+        }
+        // 행은 있는데 아직 구매버튼이 없음 = 접수 시작 전 → 정상, 계속 시도
       }
-
-      const btn = scope.locator(selectors.reserveButton).first();
-      await btn.waitFor({ state: 'visible', timeout: interval });
-      await btn.click({ timeout: 2000 });
-      console.log(`[신청] '구매하기' 클릭 성공 (시도 ${attempt}회)`);
-      return true;
-    } catch {
-      await sleep(interval);
+      backoff = 0; // 페이지는 정상적으로 받았으므로 백오프 없음
+    } catch (e) {
+      // 접속 실패/타임아웃 = 서버 과부하 신호 → 대기시간을 늘려 서버를 덜 두들긴다
+      backoff = Math.min(backoff ? backoff * 2 : 1000, maxBackoff);
+      console.warn(`[신청] 접속 지연/오류 — ${(backoff / 1000).toFixed(1)}초 후 재시도 (${String(e.message || e).split('\n')[0]})`);
     }
+
+    const remain = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+    if (cycle % 5 === 0) console.log(`[신청] 계속 시도 중... (${cycle}회 시도, 남은 ${remain}초)`);
+    await sleep(backoff || baseInterval);
   }
-  console.warn('[신청] 자동 클릭에 실패했습니다. 창에서 직접 대전 선상주차장 구매를 진행해 주세요.');
+  console.warn('[신청] 제한 시간 내 자동 클릭에 실패했습니다. 열려 있는 창에서 직접 구매를 진행해 주세요.');
   return false;
 }
 
@@ -314,8 +325,8 @@ async function main() {
     const warmupAt = targetEpochMs - warmupMs;
     await waitWithKeepAlive(page, cfg, warmupAt, serverNow);
 
-    // 대상 항목이 있는 페이지(예: 3페이지)로 미리 이동해 대기
-    await goToItemPage(page, cfg);
+    // 대상 항목이 있는 페이지(예: 3페이지)로 미리 이동해 대기 (실패해도 발사는 진행)
+    await goToItemPage(page, cfg).catch(() => {});
 
     // 5) 목표 시각(- fireLead)까지 정밀 대기 후 신청
     await waitUntilServerTime(targetEpochMs - fireLeadMs, serverNow, '예매 시작');
