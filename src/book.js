@@ -234,17 +234,20 @@ function itemRow(page, itemText) {
   return page.locator('tr').filter({ has: page.getByText(itemText, { exact: true }) }).first();
 }
 
-// 목록 3페이지 HTML(문자열)에서 특정 주차장 행의 getSeasonBuyDetail('pluNo','code') 를 뽑는다.
-// 셀 경계('>이름<')로 매칭해 '서대전역 선상' 같은 유사 이름 오탐을 방지한다.
+// 목록 HTML(문자열)에서 특정 주차장 행의 getSeasonBuyDetail('pluNo','code') 를 뽑는다.
+// 행 단위로 쪼개어, 이름이 '셀 텍스트'로 정확히 있는 행에서만 추출(공백 허용, 유사이름 오탐 방지).
 function extractBuyCall(html, itemText) {
   if (!html || !itemText) return null;
-  const idx = html.indexOf('>' + itemText + '<');
-  if (idx < 0) return null;
-  const after = html.slice(idx, idx + 4000);
-  const nextRow = after.search(/<tr[\s>]/i);
-  const seg = nextRow > 0 ? after.slice(0, nextRow) : after; // 같은 행 안으로 한정
-  const m = seg.match(/getSeasonBuyDetail\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/);
-  return m ? { fn: 'getSeasonBuyDetail', args: [m[1], m[2]] } : null;
+  const esc = itemText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const nameRe = new RegExp('>\\s*' + esc + '\\s*<');
+  const rows = html.split(/<tr[\s>]/i);
+  for (const row of rows) {
+    if (!nameRe.test(row)) continue;
+    const m = row.match(/getSeasonBuyDetail\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/);
+    if (m) return { fn: 'getSeasonBuyDetail', args: [m[1], m[2]] };
+    return null; // 이름 행은 있으나 구매버튼 없음(접수전/마감)
+  }
+  return null;
 }
 
 // "getSeasonBuyDetail('180443','FT...')" 같은 문자열에서 함수명과 인자를 뽑아낸다.
@@ -347,17 +350,33 @@ async function fastReserve(page, cfg, control = {}, tag = '') {
     cycle++;
     try {
       // 1) 3페이지 데이터만 POST로 가져오기 (page 컨텍스트 = 로그인 세션 그대로 사용)
-      const html = await page.evaluate(async ({ path, body }) => {
-        const res = await fetch(path, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-          body, cache: 'no-store',
-        });
-        return await res.text();
+      const resp = await page.evaluate(async ({ path, body }) => {
+        try {
+          const res = await fetch(path, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body, cache: 'no-store',
+          });
+          return { status: res.status, text: await res.text() };
+        } catch (e) { return { error: String(e) }; }
       }, { path: listPath, body });
+      if (resp.error) throw new Error('fetch 실패: ' + resp.error);
+      const html = resp.text || '';
 
       // 2) 대상 행의 구매코드 찾기
       const call = extractBuyCall(html, target.itemText);
+
+      // 진단: 코드를 못 찾으면 첫 회에 응답을 파일로 저장하고 상태를 알려준다
+      if (!call && !control.diagDumped) {
+        control.diagDumped = true;
+        const hasName = html.includes(target.itemText);
+        const hasFunc = html.includes('getSeasonBuyDetail');
+        console.warn(`${pfx}진단: HTTP ${resp.status}, 길이 ${html.length}, '${target.itemText}' 포함=${hasName}, getSeasonBuyDetail 포함=${hasFunc}`);
+        try { writeFileSync(join(ROOT, 'fast-response.txt'), html, 'utf-8'); console.warn(`${pfx}응답을 fast-response.txt 에 저장했습니다.`); } catch { /* */ }
+      }
       if (call) {
         if (!captured && !control.captured) {
           captured = control.captured = true;

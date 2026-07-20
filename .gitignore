@@ -4,5 +4,6 @@ user-data/
 screenshots/
 buy-target.txt
 reserve-requests.log
+fast-response.txt
 *.log
 .DS_Store
