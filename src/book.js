@@ -234,6 +234,19 @@ function itemRow(page, itemText) {
   return page.locator('tr').filter({ has: page.getByText(itemText, { exact: true }) }).first();
 }
 
+// 목록 3페이지 HTML(문자열)에서 특정 주차장 행의 getSeasonBuyDetail('pluNo','code') 를 뽑는다.
+// 셀 경계('>이름<')로 매칭해 '서대전역 선상' 같은 유사 이름 오탐을 방지한다.
+function extractBuyCall(html, itemText) {
+  if (!html || !itemText) return null;
+  const idx = html.indexOf('>' + itemText + '<');
+  if (idx < 0) return null;
+  const after = html.slice(idx, idx + 4000);
+  const nextRow = after.search(/<tr[\s>]/i);
+  const seg = nextRow > 0 ? after.slice(0, nextRow) : after; // 같은 행 안으로 한정
+  const m = seg.match(/getSeasonBuyDetail\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/);
+  return m ? { fn: 'getSeasonBuyDetail', args: [m[1], m[2]] } : null;
+}
+
 // "getSeasonBuyDetail('180443','FT...')" 같은 문자열에서 함수명과 인자를 뽑아낸다.
 function parseJsCall(code) {
   if (!code) return null;
@@ -315,6 +328,65 @@ async function looksLikeBuyPage(page, cfg) {
 // - target.buyUrl 이 있으면: 그 주소로 '직행'(가장 빠름)
 // - 없으면: 목록을 새로고침하며 대상 행의 '구매하기' 를 클릭
 // 정상일 땐 짧은 간격으로 촘촘히, 서버가 실제로 오류를 내면 백오프로 물러선다.
+// ── 고속 모드 ──
+// 목록 페이지를 통째로 새로고침하지 않고, 3페이지 데이터만 POST(getSeasonTicketList.do)로 받아
+// 대상 행의 구매코드를 뽑아 즉시 getSeasonBuyDetail 을 호출한다. (한 번의 가벼운 요청 = 훨씬 빠름)
+// 전제: page 가 knpark.com 도메인에 있고(같은 출처 fetch + 세션 쿠키), getSeasonBuyDetail 이 정의돼 있어야 함.
+async function fastReserve(page, cfg, control = {}, tag = '') {
+  const { target, options } = cfg;
+  const pfx = tag ? `[고속${tag}] ` : '[고속] ';
+  const maxSeconds = options?.maxTrySeconds ?? 180;
+  const baseInterval = options?.clickIntervalMs ?? 200;
+  const maxBackoff = (options?.maxBackoffSeconds ?? 6) * 1000;
+  const listPath = target.listApi || '/season/getSeasonTicketList.do';
+  const body = `pageNo=${Number(target.pageNo) || 1}&selector=1&selectornm=`;
+  const deadline = Date.now() + maxSeconds * 1000;
+  let backoff = 0, cycle = 0, captured = false;
+
+  while (!control.done && Date.now() < deadline) {
+    cycle++;
+    try {
+      // 1) 3페이지 데이터만 POST로 가져오기 (page 컨텍스트 = 로그인 세션 그대로 사용)
+      const html = await page.evaluate(async ({ path, body }) => {
+        const res = await fetch(path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+          body, cache: 'no-store',
+        });
+        return await res.text();
+      }, { path: listPath, body });
+
+      // 2) 대상 행의 구매코드 찾기
+      const call = extractBuyCall(html, target.itemText);
+      if (call) {
+        if (!captured && !control.captured) {
+          captured = control.captured = true;
+          console.log(`${pfx}구매코드 확보: getSeasonBuyDetail('${call.args[0]}','${call.args[1]}')`);
+          try { writeFileSync(join(ROOT, 'buy-target.txt'), JSON.stringify(call, null, 2), 'utf-8'); } catch { /* */ }
+        }
+        if (control.done) return false;
+        // 3) 그 함수를 즉시 호출 → 구매 페이지로 이동
+        const ran = await page.evaluate(({ fn, args }) => {
+          if (typeof window[fn] === 'function') { window[fn](...args); return true; }
+          return false;
+        }, call).catch(() => false);
+        if (ran) {
+          control.done = true; control.winner = page;
+          console.log(`${pfx}구매 실행! (${cycle}회, getSeasonBuyDetail 직접 호출)`);
+          return true;
+        }
+      }
+      backoff = 0;
+    } catch (e) {
+      backoff = Math.min(backoff ? backoff * 2 : 1000, maxBackoff);
+      console.warn(`${pfx}지연/오류 — ${(backoff / 1000).toFixed(1)}초 후 재시도 (${String(e.message || e).split('\n')[0]})`);
+    }
+    if (cycle % 20 === 0) console.log(`${pfx}고속 시도 중... (${cycle}회, 남은 ${Math.max(0, Math.round((deadline - Date.now()) / 1000))}초)`);
+    await sleep(backoff || baseInterval);
+  }
+  return false;
+}
+
 async function clickReserve(page, cfg, control = {}, tag = '') {
   const { selectors, target, options } = cfg;
   const maxSeconds = options?.maxTrySeconds ?? 180;
@@ -428,9 +500,11 @@ async function main() {
     await waitUntilServerTime(targetEpochMs - fireLeadMs, serverNow, '예매 시작');
     console.log(`[발사] ${fmt(serverNow().getTime())} — 신청을 시작합니다!`);
 
+    const worker = cfg.options?.fastMode ? fastReserve : clickReserve;
+    if (cfg.options?.fastMode) console.log('[모드] 고속 모드(POST 직접 폴링)로 실행합니다.');
     const control = { done: false };
     const results = await Promise.all(
-      pages.map((p, i) => clickReserve(p, cfg, control, nTabs > 1 ? `#${i + 1}` : '')),
+      pages.map((p, i) => worker(p, cfg, control, nTabs > 1 ? `#${i + 1}` : '')),
     );
     const ok = results.some(Boolean);
     const winner = control.winner || page;
