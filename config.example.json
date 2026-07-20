@@ -29,7 +29,8 @@
     "loginUrl": "https://www.knpark.com/",
     "_comment_check": "로그인된 상태에서만 보이는 요소의 셀렉터(예: 로그아웃 링크, 마이페이지, 내 아이디). 이것으로 로그인 여부를 확인합니다. 비우면 확인을 건너뜁니다.",
     "loginCheck": "a:has-text('로그아웃'), a:has-text('마이페이지'), .logout",
-    "reserveButton": "button:has-text('구매'), a:has-text('구매'), button:has-text('신청'), a:has-text('신청'), button:has-text('예매'), a:has-text('예매'), .btn_buy, .btn_apply, .btn_reserve",
+    "_comment_reserve": "구매하기는 '이미지 버튼'(btn_buy.png)이라 글자 '구매'로는 안 잡힙니다. getSeasonBuyDetail 링크와 btn_buy 이미지를 우선 타겟팅.",
+    "reserveButton": "a[href*='getSeasonBuyDetail'], a:has(img[src*='btn_buy']), img[src*='btn_buy'], .btn_buy, a:has-text('구매')",
     "confirmButton": "button:has-text('확인'), button:has-text('결제'), .btn_confirm"
   },
 
