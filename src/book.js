@@ -234,20 +234,25 @@ function itemRow(page, itemText) {
   return page.locator('tr').filter({ has: page.getByText(itemText, { exact: true }) }).first();
 }
 
-// 목록 HTML(문자열)에서 특정 주차장 행의 getSeasonBuyDetail('pluNo','code') 를 뽑는다.
-// 행 단위로 쪼개어, 이름이 '셀 텍스트'로 정확히 있는 행에서만 추출(공백 허용, 유사이름 오탐 방지).
-function extractBuyCall(html, itemText) {
-  if (!html || !itemText) return null;
-  const esc = itemText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const nameRe = new RegExp('>\\s*' + esc + '\\s*<');
-  const rows = html.split(/<tr[\s>]/i);
-  for (const row of rows) {
-    if (!nameRe.test(row)) continue;
-    const m = row.match(/getSeasonBuyDetail\s*\(\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\)/);
-    if (m) return { fn: 'getSeasonBuyDetail', args: [m[1], m[2]] };
-    return null; // 이름 행은 있으나 구매버튼 없음(접수전/마감)
-  }
-  return null;
+// getSeasonTicketList.do 의 JSON 응답에서 대상 주차장(pttl 정확일치) 정보를 찾는다.
+// 반환: { found, sellable, sellFlag, pluNo, fv }  (구매코드 = getSeasonBuyDetail(pluNo, fv))
+function extractBuyFromJson(text, itemText, cfg) {
+  let data;
+  try { data = JSON.parse(text); } catch { return null; } // JSON 아니면 판단 불가
+  const list = data.resultList || data.list || data.rows || [];
+  if (!Array.isArray(list)) return null;
+  const name = String(itemText).trim();
+  const item = list.find((it) => String(it.pttl ?? it.name ?? '').trim() === name);
+  if (!item) return { found: false };
+  const sellField = cfg?.target?.sellField || 'ompSellYn';
+  const sellValue = cfg?.target?.sellValue || 'Y';
+  return {
+    found: true,
+    sellable: String(item[sellField]) === sellValue,
+    sellFlag: item[sellField],
+    pluNo: item.pluNo,
+    fv: item.fv,
+  };
 }
 
 // "getSeasonBuyDetail('180443','FT...')" 같은 문자열에서 함수명과 인자를 뽑아낸다.
@@ -364,36 +369,38 @@ async function fastReserve(page, cfg, control = {}, tag = '') {
         } catch (e) { return { error: String(e) }; }
       }, { path: listPath, body });
       if (resp.error) throw new Error('fetch 실패: ' + resp.error);
-      const html = resp.text || '';
+      const text = resp.text || '';
 
-      // 2) 대상 행의 구매코드 찾기
-      const call = extractBuyCall(html, target.itemText);
+      // 2) JSON 파싱 → 대상 항목(pttl 정확일치) 찾기
+      const info = extractBuyFromJson(text, target.itemText, cfg);
 
-      // 진단: 코드를 못 찾으면 첫 회에 응답을 파일로 저장하고 상태를 알려준다
-      if (!call && !control.diagDumped) {
+      // 진단: 항목을 못 찾으면 첫 회에 응답을 파일로 저장
+      if ((!info || !info.found) && !control.diagDumped) {
         control.diagDumped = true;
-        const hasName = html.includes(target.itemText);
-        const hasFunc = html.includes('getSeasonBuyDetail');
-        console.warn(`${pfx}진단: HTTP ${resp.status}, 길이 ${html.length}, '${target.itemText}' 포함=${hasName}, getSeasonBuyDetail 포함=${hasFunc}`);
-        try { writeFileSync(join(ROOT, 'fast-response.txt'), html, 'utf-8'); console.warn(`${pfx}응답을 fast-response.txt 에 저장했습니다.`); } catch { /* */ }
+        console.warn(`${pfx}진단: HTTP ${resp.status}, 길이 ${text.length}, '${target.itemText}' 항목 못 찾음 (fast-response.txt 저장)`);
+        try { writeFileSync(join(ROOT, 'fast-response.txt'), text, 'utf-8'); } catch { /* */ }
       }
-      if (call) {
+
+      if (info && info.found) {
         if (!captured && !control.captured) {
           captured = control.captured = true;
-          console.log(`${pfx}구매코드 확보: getSeasonBuyDetail('${call.args[0]}','${call.args[1]}')`);
-          try { writeFileSync(join(ROOT, 'buy-target.txt'), JSON.stringify(call, null, 2), 'utf-8'); } catch { /* */ }
+          console.log(`${pfx}대상 확인: ${target.itemText} pluNo=${info.pluNo} fv=${info.fv} 판매상태=${info.sellFlag}`);
+          try { writeFileSync(join(ROOT, 'buy-target.txt'), JSON.stringify(info, null, 2), 'utf-8'); } catch { /* */ }
         }
-        if (control.done) return false;
-        // 3) 그 함수를 즉시 호출 → 구매 페이지로 이동
-        const ran = await page.evaluate(({ fn, args }) => {
-          if (typeof window[fn] === 'function') { window[fn](...args); return true; }
-          return false;
-        }, call).catch(() => false);
-        if (ran) {
-          control.done = true; control.winner = page;
-          console.log(`${pfx}구매 실행! (${cycle}회, getSeasonBuyDetail 직접 호출)`);
-          return true;
+        // 3) 판매중(ompSellYn=Y)이면 즉시 getSeasonBuyDetail(pluNo, fv) 호출
+        if (info.sellable && info.pluNo && info.fv) {
+          if (control.done) return false;
+          const ran = await page.evaluate(({ p, f }) => {
+            if (typeof window.getSeasonBuyDetail === 'function') { window.getSeasonBuyDetail(p, f); return true; }
+            return false;
+          }, { p: info.pluNo, f: info.fv }).catch(() => false);
+          if (ran) {
+            control.done = true; control.winner = page;
+            console.log(`${pfx}구매 실행! (${cycle}회) getSeasonBuyDetail('${info.pluNo}','${info.fv}')`);
+            return true;
+          }
         }
+        // 찾았지만 아직 판매전(C) → 계속 폴링
       }
       backoff = 0;
     } catch (e) {
@@ -519,11 +526,16 @@ async function main() {
     await waitUntilServerTime(targetEpochMs - fireLeadMs, serverNow, '예매 시작');
     console.log(`[발사] ${fmt(serverNow().getTime())} — 신청을 시작합니다!`);
 
-    const worker = cfg.options?.fastMode ? fastReserve : clickReserve;
-    if (cfg.options?.fastMode) console.log('[모드] 고속 모드(POST 직접 폴링)로 실행합니다.');
+    const fast = !!cfg.options?.fastMode;
+    if (fast) console.log(`[모드] 고속 모드(JSON 폴링) 실행${nTabs >= 2 ? ' + 마지막 탭은 일반 모드 병행(안전망)' : ''}`);
     const control = { done: false };
     const results = await Promise.all(
-      pages.map((p, i) => worker(p, cfg, control, nTabs > 1 ? `#${i + 1}` : '')),
+      pages.map((p, i) => {
+        // 고속+다중탭이면 마지막 탭 1개는 검증된 일반 모드로 병행(고속 모드 오판 대비 안전망)
+        const useList = !fast || (nTabs >= 2 && i === nTabs - 1);
+        const w = useList ? clickReserve : fastReserve;
+        return w(p, cfg, control, nTabs > 1 ? `#${i + 1}` : '');
+      }),
     );
     const ok = results.some(Boolean);
     const winner = control.winner || page;
