@@ -234,6 +234,36 @@ function itemRow(page, itemText) {
   return page.locator('tr').filter({ has: page.getByText(itemText, { exact: true }) }).first();
 }
 
+// "getSeasonBuyDetail('180443','FT...')" 같은 문자열에서 함수명과 인자를 뽑아낸다.
+function parseJsCall(code) {
+  if (!code) return null;
+  const s = code.replace(/^javascript:/i, '').trim();
+  const m = s.match(/([A-Za-z_$][\w$]*)\s*\(([^)]*)\)/);
+  if (!m) return null;
+  const fn = m[1];
+  const args = m[2].trim()
+    ? m[2].split(',').map((a) => a.trim().replace(/^['"]|['"]$/g, ''))
+    : [];
+  return { fn, args };
+}
+
+// 구매하기 버튼을 '실행'한다. 버튼 안의 함수(getSeasonBuyDetail 등)를 직접 호출(가장 빠르고 안정적),
+// 안 되면 일반 클릭으로 폴백.
+async function fireBuy(page, btn) {
+  const code = await btn.evaluate((el) => el.getAttribute('onclick') || el.getAttribute('href') || '').catch(() => '');
+  const call = parseJsCall(code);
+  if (call) {
+    const ran = await page.evaluate(({ fn, args }) => {
+      if (typeof window[fn] === 'function') { window[fn](...args); return true; }
+      return false;
+    }, call).catch(() => false);
+    if (ran) return `함수 ${call.fn}(${call.args.join(', ')}) 직접 호출`;
+  }
+  await btn.scrollIntoViewIfNeeded().catch(() => {});
+  await btn.click({ timeout: 3000 });
+  return '버튼 클릭';
+}
+
 // '구매하기' 버튼이 처음 나타난 순간, 그 실제 주소(href/onclick)를 화면과 파일에 기록한다.
 // → 다음 실행부터 target.buyUrl 에 그 주소를 넣으면 '직행 모드' 로 훨씬 빠르게 예매할 수 있다.
 async function captureBuyTarget(btn) {
@@ -316,11 +346,10 @@ async function clickReserve(page, cfg, control = {}, tag = '') {
           const btn = row.locator(selectors.reserveButton).first();
           if (await btn.count()) {
             if (!captured && !control.captured) { captured = control.captured = true; await captureBuyTarget(btn); }
-            await btn.scrollIntoViewIfNeeded().catch(() => {});
             if (control.done) return false;
-            await btn.click({ timeout: 3000 });
+            const how = await fireBuy(page, btn);
             control.done = true; control.winner = page;
-            console.log(`${pfx}'구매하기' 클릭 성공! (${cycle}회)`);
+            console.log(`${pfx}구매 실행 성공! (${cycle}회, ${how})`);
             return true;
           }
           // 행은 있으나 구매버튼 없음 = 접수 시작 전 → 정상, 계속 시도
