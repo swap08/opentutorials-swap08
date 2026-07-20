@@ -336,6 +336,34 @@ async function looksLikeBuyPage(page, cfg) {
 // - target.buyUrl 이 있으면: 그 주소로 '직행'(가장 빠름)
 // - 없으면: 목록을 새로고침하며 대상 행의 '구매하기' 를 클릭
 // 정상일 땐 짧은 간격으로 촘촘히, 서버가 실제로 오류를 내면 백오프로 물러선다.
+// 대상 항목(pttl)이 실제로 몇 페이지에 있는지 JSON API로 찾아 반환한다.
+// (월마다 목록이 조금 바뀌어 페이지가 달라져도 자동 대응)
+async function findItemPage(page, cfg) {
+  const { target } = cfg;
+  const listApi = target.listApi || '/season/getSeasonTicketList.do';
+  const name = String(target.itemText).trim();
+  const probe = async (pageNo) => {
+    const text = await page.evaluate(async ({ path, body }) => {
+      try {
+        const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }, body, cache: 'no-store' });
+        return await r.text();
+      } catch { return ''; }
+    }, { path: listApi, body: `pageNo=${pageNo}&selector=1&selectornm=` });
+    try { return JSON.parse(text); } catch { return null; }
+  };
+  const has = (d) => d && Array.isArray(d.resultList) && d.resultList.some((it) => String(it.pttl ?? '').trim() === name);
+
+  const start = Number(target.pageNo) || 1;
+  const first = await probe(start);
+  if (has(first)) return start;
+  const finalNo = first?.pageVO?.finalPageNo || 20;
+  for (let p = 1; p <= finalNo; p++) {
+    if (p === start) continue;
+    if (has(await probe(p))) return p;
+  }
+  return null; // 못 찾음
+}
+
 // ── 고속 모드 ──
 // 목록 페이지를 통째로 새로고침하지 않고, 3페이지 데이터만 POST(getSeasonTicketList.do)로 받아
 // 대상 행의 구매코드를 뽑아 즉시 getSeasonBuyDetail 을 호출한다. (한 번의 가벼운 요청 = 훨씬 빠름)
@@ -501,14 +529,25 @@ async function main() {
 
     await ensureLoggedIn(page, cfg);
 
-    // 로그인 후 대상 페이지(예: 3페이지)로 이동해 잘 보이는지 미리 확인
-    console.log('[확인] 대상 목록 페이지로 이동해 봅니다...');
-    await goToItemPage(page, cfg);
-    if (await itemRow(page, cfg.target.itemText).count()) {
-      console.log(`[확인] '${cfg.target.itemText}' 행을 찾았습니다. ✔ (지금은 접수전이라 구매 버튼은 0시에 생깁니다)`);
-    } else {
-      console.warn(`[확인] '${cfg.target.itemText}' 행을 아직 못 찾았습니다. 위 진단 정보를 확인하세요.`);
+    // 대상이 실제로 몇 페이지에 있는지 JSON API로 자동 확인(월별로 페이지가 바뀌어도 대응)
+    console.log('[확인] 대상 위치를 확인합니다...');
+    await gotoWithRetry(page, cfg.target.reservationUrl).catch(() => {});
+    try {
+      const realPage = await findItemPage(page, cfg);
+      const setPage = Number(cfg.target.pageNo) || 1;
+      if (realPage && realPage !== setPage) {
+        console.log(`[확인] '${cfg.target.itemText}' 는 ${realPage}페이지에 있습니다. (설정 ${setPage} → ${realPage} 자동 조정)`);
+        cfg.target.pageNo = realPage;
+      } else if (realPage) {
+        console.log(`[확인] '${cfg.target.itemText}' ${realPage}페이지 확인. ✔ (접수전이면 0시에 구매 가능해집니다)`);
+      } else {
+        console.warn(`[확인] '${cfg.target.itemText}' 를 목록에서 못 찾았습니다. itemText/pageNo 를 확인하세요.`);
+      }
+    } catch (e) {
+      console.warn(`[확인] 위치 확인 실패(설정값 ${cfg.target.pageNo} 사용): ${String(e.message || e).split('\n')[0]}`);
     }
+    // 일반 모드 대비 대상 페이지로 미리 이동해 둠
+    await goToItemPage(page, cfg).catch(() => {});
 
     // 4) 목표 시각 직전(warmup)까지 대기 — 그동안 주기적으로 새로고침해 세션 유지
     const warmupAt = targetEpochMs - warmupMs;
